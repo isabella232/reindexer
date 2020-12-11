@@ -98,9 +98,11 @@ private:
 	friend class Namespace;
 	friend class QueryResults;
 	friend class RPCClient;
+	friend class CoroRPCClient;
 	friend class RPCClientMock;
 	friend class reindexer::Replicator;
 	friend class Transaction;
+	friend class CoroTransaction;
 };
 }  // namespace client
 }  // namespace reindexer

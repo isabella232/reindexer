@@ -21,7 +21,7 @@ public:
 		// clang-format off
         const string yaml =
                 "storage:\n"
-                "    path:" + kDbPath +"\n"
+                "    path: /tmp/reindex/" + kDbPath +"\n"
                 "logger:\n"
                 "   loglevel: none\n"
                 "   rpclog: \n"

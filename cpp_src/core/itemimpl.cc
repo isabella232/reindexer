@@ -101,6 +101,7 @@ void ItemImpl::ModifyField(string_view jsonPath, const VariantArray &keys, Field
 void ItemImpl::SetField(string_view jsonPath, const VariantArray &keys) { ModifyField(jsonPath, keys, FieldModeSet); }
 void ItemImpl::DropField(string_view jsonPath) { ModifyField(jsonPath, {}, FieldModeDrop); }
 Variant ItemImpl::GetField(int field) { return GetPayload().Get(field, 0); }
+void ItemImpl::GetField(int field, VariantArray &values) { GetPayload().Get(field, values); }
 
 Error ItemImpl::FromMsgPack(string_view buf, size_t &offset) {
 	Payload pl = GetPayload();

@@ -70,6 +70,7 @@ TEST_F(ClientsStatsApi, ClientsStatsValues) {
 	std::string nsName("ns1");
 	err = reindexer.OpenNamespace(nsName);
 	ASSERT_TRUE(err.ok()) << err.what();
+
 	auto tx1 = reindexer.NewTransaction(nsName);
 	ASSERT_FALSE(tx1.IsFree());
 	auto tx2 = reindexer.NewTransaction(nsName);

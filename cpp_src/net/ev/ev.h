@@ -1,12 +1,14 @@
 #pragma once
 
-#include <assert.h>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <csignal>
-#include <functional>
 #include <memory>
+#include <thread>
 #include <vector>
+
+#include "coroutine/coroutine.h"
 
 // Thank's to windows.h include
 #ifdef ERROR
@@ -137,6 +139,12 @@ public:
 	~dynamic_loop();
 	void run();
 	void break_loop();
+	void spawn(std::function<void()> func, size_t stack_size = coroutine::k_default_stack_limit) {
+		auto id = coroutine::create(std::move(func), stack_size);
+		new_tasks_.emplace_back(id);
+	}
+	template <typename Rep, typename Period>
+	void sleep(std::chrono::duration<Rep, Period> dur);
 
 protected:
 	void set(int fd, io *watcher, int events);
@@ -148,9 +156,13 @@ protected:
 	void stop(async *watcher);
 	void stop(sig *watcher);
 	void send(async *watcher);
+	bool is_active(timer *watcher);
 
 	void io_callback(int fd, int events);
 	void async_callback();
+
+	void set_coro_cb();
+	void remove_coro_cb();
 
 	struct fd_handler {
 		int emask_ = 0;
@@ -164,6 +176,11 @@ protected:
 	std::vector<sig *> sigs_;
 	bool break_ = false;
 	std::atomic<int> async_sent_;
+
+	using tasks_container = h_vector<coroutine::routine_t, 64>;
+	tasks_container new_tasks_;
+	tasks_container running_tasks_;
+	int64_t cmpl_cb_id_ = 0;
 
 #ifdef HAVE_EPOLL_LOOP
 	loop_epoll_backend backend_;
@@ -194,6 +211,9 @@ public:
 	void enable_asyncs() {
 		if (loop_) loop_->backend_.enable_asyncs();
 	}
+	void spawn(std::function<void()> func, size_t stack_size = coroutine::k_default_stack_limit) {
+		if (loop_) loop_->spawn(std::move(func), stack_size);
+	}
 
 protected:
 	template <typename... Args>
@@ -208,6 +228,11 @@ protected:
 	void send(Args... args) {
 		if (loop_) loop_->send(args...);
 	}
+	template <typename... Args>
+	bool is_active(Args... args) {
+		if (loop_) return loop_->is_active(args...);
+		return false;
+	}
 	dynamic_loop *loop_ = nullptr;
 };
 
@@ -215,7 +240,7 @@ class io {
 	friend class dynamic_loop;
 
 public:
-	io(){};
+	io() {}
 	io(const io &) = delete;
 	~io() { stop(); }
 
@@ -251,8 +276,10 @@ class timer {
 	friend class dynamic_loop;
 
 public:
-	timer(){};
+	timer() {}
 	timer(const timer &) = delete;
+	timer(timer &&) = default;
+	timer &operator=(timer &&) = default;
 	~timer() { stop(); }
 
 	void set(dynamic_loop &loop_) { loop.loop_ = &loop_; }
@@ -269,29 +296,58 @@ public:
 	}
 	void set(std::function<void(timer &, int)> func) { func_ = func; }
 
+	bool is_active() { return loop.is_active(this); }
+
 	loop_ref loop;
 	std::chrono::time_point<std::chrono::steady_clock> deadline_;
 
 protected:
+	struct coro_t {};
+	timer(coro_t) : in_coro_storage_(true) {}
+
 	void callback(int tv) {
 		assert(func_ != nullptr);
-		func_(*this, tv);
-		if (period_ > 0.00000001) {
-			loop.set(this, period_);
+		if (in_coro_storage_) {
+			auto func = std::move(func_);
+			func(*this, tv);  // Timer is deallocated after this call
+		} else {
+			func_(*this, tv);
+			if (period_ > 0.00000001) {
+				loop.set(this, period_);
+			}
 		}
 	}
 
 	std::function<void(timer &watcher, int t)> func_ = nullptr;
 	double period_ = 0;
+	bool in_coro_storage_ = false;
 };
 
 using periodic = timer;
+
+template <typename Rep, typename Period>
+void dynamic_loop::sleep(std::chrono::duration<Rep, Period> dur) {
+	auto id = coroutine::current();
+	if (id) {
+		timer tm(timer::coro_t{});
+		tm.set([id](timer &, int) { coroutine::resume(id); });
+		tm.set(*this);
+		double awaitTime = std::chrono::duration_cast<std::chrono::microseconds>(dur).count();
+		tm.start(awaitTime / 1e6);
+		do {
+			coroutine::suspend();
+		} while (tm.is_active());
+		tm.reset();
+	} else {
+		std::this_thread::sleep_for(dur);
+	}
+}
 
 class sig {
 	friend class dynamic_loop;
 
 public:
-	sig(){};
+	sig() = default;  // -V730
 	sig(const sig &) = delete;
 	~sig() { stop(); }
 
@@ -323,7 +379,7 @@ protected:
 #else
 	void (*old_handler_)(int);
 #endif
-	int signum_;
+	int signum_ = 0;
 };
 
 class async {

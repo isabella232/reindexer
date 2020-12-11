@@ -395,6 +395,33 @@ Error ReindexerImpl::TruncateNamespace(string_view nsName, const InternalRdxCont
 }
 
 Error ReindexerImpl::RenameNamespace(string_view srcNsName, const std::string& dstNsName, const InternalRdxContext& ctx) {
+	Error err;
+	try {
+		WrSerializer ser;
+		const auto rdxCtx = ctx.CreateRdxContext(
+			ctx.NeedTraceActivity() ? (ser << "RENAME " << srcNsName << " to " << dstNsName).Slice() : ""_sv, activities_);
+		{
+			SLock lock(mtx_, &rdxCtx);
+			auto srcIt = namespaces_.find(srcNsName);
+			if (srcIt == namespaces_.end()) {
+				return Error(errParams, "Namespace '%s' doesn't exist", srcNsName);
+			}
+			Namespace::Ptr srcNs = srcIt->second;
+			assert(srcNs != nullptr);
+
+			if (srcNs->IsTemporary(rdxCtx)) {
+				return Error(errParams, "Can't rename temporary namespace '%s'", srcNsName);
+			}
+		}
+		err = renameNamespace(srcNsName, dstNsName, false, ctx);
+	} catch (const Error& e) {
+		return e;
+	}
+	return err;
+}
+
+Error ReindexerImpl::renameNamespace(string_view srcNsName, const std::string& dstNsName, bool fromReplication,
+									 const InternalRdxContext& ctx) {
 	Namespace::Ptr dstNs, srcNs;
 	try {
 		if (dstNsName == srcNsName.data()) return errOK;
@@ -425,20 +452,27 @@ Error ReindexerImpl::RenameNamespace(string_view srcNsName, const std::string& d
 		srcNs = srcIt->second;
 		assert(srcNs != nullptr);
 
-		auto dstIt = namespaces_.find(dstNsName);
-		auto needWalUpdate = !srcNs->GetDefinition(rdxCtx).isTemporary;
-		if (dstIt != namespaces_.end()) {
-			dstNs = dstIt->second;
-			assert(dstNs != nullptr);
-			srcNs->Rename(dstNs, storagePath_, rdxCtx);
-		} else {
-			srcNs->Rename(dstNsName, storagePath_, rdxCtx);
-		}
-		if (needWalUpdate) observers_.OnWALUpdate(LSNPair(), srcNsName, WALRecord(WalNamespaceRename, dstNsName));
+		auto replState = srcNs->GetReplState(rdxCtx);
 
-		auto srcNamespace = srcIt->second;
-		namespaces_.erase(srcIt);
-		namespaces_[dstNsName] = std::move(srcNamespace);
+		if (fromReplication || !replState.slaveMode)  // rename from replicator forced temporary ns
+		{
+			auto dstIt = namespaces_.find(dstNsName);
+			auto needWalUpdate = !srcNs->GetDefinition(rdxCtx).isTemporary;
+			if (dstIt != namespaces_.end()) {
+				dstNs = dstIt->second;
+				assert(dstNs != nullptr);
+				srcNs->Rename(dstNs, storagePath_, rdxCtx);
+			} else {
+				srcNs->Rename(dstNsName, storagePath_, rdxCtx);
+			}
+			if (needWalUpdate) observers_.OnWALUpdate(LSNPair(), srcNsName, WALRecord(WalNamespaceRename, dstNsName));
+
+			auto srcNamespace = srcIt->second;
+			namespaces_.erase(srcIt);
+			namespaces_[dstNsName] = std::move(srcNamespace);
+		} else {
+			return Error(errLogic, "Can't rename namespace in slave mode '%s'", srcNsName);
+		}
 	} catch (const Error& err) {
 		return err;
 	}
@@ -845,7 +879,7 @@ JoinedSelectors ReindexerImpl::prepareJoinedSelectors(const Query& q, QueryResul
 		}
 
 		queryResultsContexts.emplace_back(jns->payloadType_, jns->tagsMatcher_, FieldsSet(jns->tagsMatcher_, jq.selectFilter_),
-                                          jns->schema_);
+										  jns->schema_);
 
 		if (preResult->dataMode == JoinPreResult::ModeValues) {
 			jItemQ.entries.ForEachEntry([&jns](QueryEntry& qe) {
@@ -1207,12 +1241,12 @@ std::vector<string> defDBConfig = {
 				"lazyload":false,
 				"unload_idle_threshold":0,
 				"join_cache_mode":"off",
-				"start_copy_policy_tx_size":10000
-				"copy_policy_multiplier":5
+				"start_copy_policy_tx_size":10000,
+				"copy_policy_multiplier":5,
 				"tx_size_to_always_copy":100000,
 				"optimization_timeout_ms":800,
 				"optimization_sort_workers":4,
-				"wal_size":4000000,
+				"wal_size":4000000
 			}
     	]
 	})json",

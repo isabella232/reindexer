@@ -67,6 +67,7 @@ public:
 	void SetField(string_view jsonPath, const VariantArray &keys);
 	void DropField(string_view jsonPath);
 	Variant GetField(int field);
+	void GetField(int field, VariantArray &);
 	FieldsSet PkFields() const { return pkFields_; }
 	int NameTag(string_view name) const { return tagsMatcher_.name2tag(name); }
 
